@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Voice to SQL Frontend</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      max-width: 600px;
+      margin: 2rem auto;
+      text-align: center;
+    }
+    button {
+      background-color: #1cb954;
+      color: white;
+      font-size: 1.2rem;
+      padding: 10px 20px;
+      margin: 1rem 0;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+    }
+    button:disabled {
+      background-color: #17a44b;
+      cursor: not-allowed;
+      opacity: 0.6;
+    }
+    #result {
+      margin-top: 1rem;
+      white-space: pre-wrap;
+      background: #f9f9f9;
+      padding: 1rem;
+      border-radius: 10px;
+      text-align: left;
+      font-size: 1rem;
+      line-height: 1.5;
+    }
+    pre {
+      background: #efefef;
+      padding: 8px;
+      border-radius: 6px;
+      overflow-x: auto;
+    }
+  </style>
+</head>
+<body>
+
+  <h1>🎤 Voice to SQL Generator</h1>
+  <button id="recordBtn">🎤 Start Recording</button>
+
+  <div id="result">Your transcribed SQL will appear here.</div>
+
+  <script>
+  let recorder;
+  let audioChunks = [];
+  let isRecording = false;
+  const recordBtn = document.getElementById('recordBtn');
+  const resultDiv = document.getElementById('result');
+
+  let audioContext, analyser, microphone, silenceTimer;
+
+  recordBtn.onclick = async () => {
+    if (isRecording) return;
+
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      resultDiv.textContent = '⚠ Your browser does not support audio recording.';
+      return;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      audioChunks = [];
+      recorder = new MediaRecorder(stream);
+
+      recorder.ondataavailable = e => audioChunks.push(e.data);
+
+      recorder.onstop = async () => {
+        isRecording = false;
+        recordBtn.disabled = false;
+        recordBtn.textContent = '🎤 Start Recording';
+        resultDiv.textContent = '⏳ Processing audio...';
+
+        const audioBlob = new Blob(audioChunks, { type: 'audio/wav' });
+        await sendAudioToVoiceToSQL(audioBlob);
+
+        // Stop all tracks
+        stream.getTracks().forEach(track => track.stop());
+
+        // Close audio context
+        if (audioContext) audioContext.close();
+      };
+
+      recorder.start();
+      isRecording = true;
+      recordBtn.textContent = '🎙 Listening...';
+      recordBtn.disabled = true;
+      resultDiv.textContent = '🎙 Speak now...';
+
+      // Setup audio context for silence detection
+      audioContext = new AudioContext();
+      microphone = audioContext.createMediaStreamSource(stream);
+      analyser = audioContext.createAnalyser();
+      analyser.fftSize = 2048;
+      microphone.connect(analyser);
+
+      // Start silence detection AFTER 2 seconds
+setTimeout(() => {
+  detectSilence(analyser, () => {
+    if (recorder && recorder.state === 'recording') {
+      recorder.stop();
+    }
+  }, 2000, -60); // silenceDuration = 2s, threshold = -60 dB
+}, 2000); // delay before enabling silence detection
+// 2 seconds silence, threshold -60dB
+
+
+
+    } catch (err) {
+      resultDiv.textContent = '⚠ Microphone error: ' + err.message;
+    }
+  };
+
+  function detectSilence(analyser, onSilence, silenceDelay = 2000, minDecibels = -60) {
+    const buffer = new Uint8Array(analyser.fftSize);
+    let silenceStart = performance.now();
+
+    function loop() {
+      analyser.getByteTimeDomainData(buffer);
+      const maxVolume = Math.max(...buffer) - 128;
+
+      if (Math.abs(maxVolume) < 6) {
+        // Volume is near silent
+        if (performance.now() - silenceStart > silenceDelay) {
+          onSilence();
+          return;
+        }
+      } else {
+        silenceStart = performance.now();
+      }
+
+      requestAnimationFrame(loop);
+    }
+
+    loop();
+  }
+
+  async function sendAudioToVoiceToSQL(audioBlob) {
+    const formData = new FormData();
+    formData.append('file', audioBlob, 'recording.wav');
+
+    try {
+      const response = await fetch('http://127.0.0.1:8000/voice-to-sql/', {
+        method: 'POST',
+        body: formData,
+      });
+
+      const data = await response.json();
+
+      if (data.success) {
+        const sql = data.query || '';
+        const summary = data.summary || '';
+        resultDiv.innerHTML = `
+          <strong>📝 Recognized Text:</strong><br>${data.text}<br><br>
+          <strong>💡 Generated SQL:</strong><br><pre>${sql}</pre><br>
+          <strong>✨ Summary:</strong><br>${summary.replace(/\n/g, "<br>")}
+        `;
+      } else {
+        resultDiv.innerHTML = `
+          ❌ <strong>Error:</strong><br>${data.error || 'Unknown error.'}<br><br>
+          📝 <strong>Transcribed Text:</strong><br>${data.text || 'N/A'}
+        `;
+      }
+    } catch (error) {
+      resultDiv.textContent = '❌ Error connecting to the server.';
+      console.error(error);
+    }
+  }
+
+  window.onbeforeunload = () => {
+    if (recorder && recorder.state !== 'inactive') {
+      recorder.stop();
+    }
+  };
+</script>
+
+
+</body>
+</html>
